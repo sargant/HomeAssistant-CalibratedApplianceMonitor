@@ -11,6 +11,17 @@ Currently calibrated for:
 
 ## Installation
 
+### HACS
+
+Add this repository to HACS as a custom repository of type **Integration**:
+
+    https://github.com/sargant/HomeAssistant-CalibratedApplianceMonitor
+
+Install **Calibrated Appliance Monitor**, restart Home Assistant, then add it from
+**Settings → Devices & services**.
+
+### Manual
+
 Copy:
 
     custom_components/calibrated_appliance_monitor
@@ -20,12 +31,12 @@ to:
     /config/custom_components/calibrated_appliance_monitor
 
 Restart Home Assistant, then add **Calibrated Appliance Monitor** from
-**Settings → Devices & services** and select the smart-plug device and appliance
-calibration.
+**Settings → Devices & services**.
 
-The integration discovers power and cumulative-energy sensors from the selected
-smart-plug device. To change the plug or appliance calibration, remove the
-config entry and add it again.
+Select the smart-plug device and appliance calibration. The integration discovers
+power and cumulative-energy sensors from the selected smart-plug device. To
+change the plug or appliance calibration, remove the config entry and add it
+again.
 
 ## Entities
 

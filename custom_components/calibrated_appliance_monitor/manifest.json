@@ -3,8 +3,9 @@
   "name": "Calibrated Appliance Monitor",
   "codeowners": ["@sargant"],
   "config_flow": true,
-  "documentation": "https://github.com/sargant/homeassistant-bits",
+  "documentation": "https://github.com/sargant/HomeAssistant-CalibratedApplianceMonitor",
   "integration_type": "device",
   "iot_class": "calculated",
+  "issue_tracker": "https://github.com/sargant/HomeAssistant-CalibratedApplianceMonitor/issues",
   "version": "0.2.0"
 }
