@@ -44,12 +44,12 @@ Both calibrations expose:
 
 The washer-dryer also exposes:
 
-- **Drying start candidate** — hidden by default
+- **Drying start candidate**
 - **Drying start time**
-- **Cycle finish candidate** — hidden by default
+- **Cycle finish candidate**
 
-Hidden diagnostics remain enabled and recorded. Visibility defaults only affect
-newly created registry entries.
+All diagnostic entities are hidden by default but remain enabled and recorded.
+Visibility defaults only affect newly created registry entries.
 
 Thresholds and state machines live in `algorithms/` and are intentionally fixed
 per appliance. Notifications and pricing stay in normal Home Assistant

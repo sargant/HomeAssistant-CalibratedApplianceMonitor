@@ -2,132 +2,108 @@
 
 ## Project purpose
 
-This repository is a personal collection of Home Assistant configuration and
-experiments, mostly YAML.
+This repository contains one Home Assistant custom integration: **Calibrated
+Appliance Monitor**.
 
-It may contain appliance monitoring, automations, scripts, template entities,
-notifications, lighting experiments, and other miscellaneous Home Assistant
-configuration. Small custom integrations or other code are also appropriate
-when explicitly requested.
+The integration detects appliance cycles from smart-plug power and cumulative
+energy data using appliance-specific algorithms calibrated from recorded traces.
+Runtime code lives under:
 
-There is no requirement for the contents to form a coherent application or
-shared framework.
+    custom_components/calibrated_appliance_monitor/
 
-Keep the repository lightweight.
+Keep the repository focused on this integration.
 
-## Repository philosophy
+## Repository boundary
 
-Prefer straightforward Home Assistant YAML that is easy to read, inspect,
-modify, and copy into a Home Assistant installation.
+This repository is intentionally separate from household Home Assistant
+configuration.
 
-Do not introduce additional architecture merely because several files happen to
-live in the same repository.
+Do not add installation-specific entity IDs, notification targets, tariff
+entities, secrets, dashboards, automations, packages, or other private household
+configuration. Notifications, pricing policy, and other site-specific behaviour
+belong outside this repository unless a genuinely reusable integration feature
+is explicitly requested.
 
-In particular, do not add custom integrations, Python applications, Node-RED
-flows, reusable frameworks, generators, build systems, dependency management,
-CI, CODEOWNERS, release tooling, or other project scaffolding unless explicitly
-asked.
+Do not copy unrelated configuration or experiments into this repository.
 
-A slightly repetitive YAML file is often preferable to an abstraction that
-makes a personal Home Assistant configuration harder to understand.
+## Working with the integration
 
-## Working with existing files
+Read the relevant files in full before modifying them. Preserve existing
+behaviour unless the requested change requires altering it, and make the
+smallest coherent change needed.
 
-Before changing a YAML file, read the whole file.
+Preserve existing config-entry identity and entity `unique_id` values unless an
+identity change is explicitly intended. Avoid migrations or compatibility
+machinery unless they are actually needed.
 
-Treat the file itself — especially its header comments and explanatory comments
-— as the source of truth for its intended behaviour.
+Keep shared integration plumbing small. Appliance-specific thresholds and state
+machines belong in `algorithms/`; do not generalise them merely because two
+appliances have superficially similar behaviour.
 
-Preserve existing behaviour unless the requested change requires altering it.
+## Calibration algorithms
 
-Make the smallest coherent change needed.
+Treat recorded appliance traces as the evidence for calibration changes.
 
-Do not perform unrelated refactors, rename entities, change IDs, alter
-thresholds, or reorganise files merely for stylistic consistency.
+When changing thresholds, debounce windows, timing, or classification rules:
 
-Different YAML files may intentionally use different approaches. Do not
-prematurely generalise them into a common framework.
+- preserve the distinction between measured cycle boundaries and informative
+  phase labels;
+- prefer robust electrical signatures over programme names or displayed
+  appliance timers;
+- keep candidate/debounce bookkeeping out of the public entity model unless it
+  is genuinely useful to Home Assistant users;
+- explain non-obvious calibration choices in comments, especially where a
+  threshold exists to reject a pattern seen in recorded traces.
+
+Do not retune an appliance algorithm without evidence or an explicit request.
 
 ## Home Assistant conventions
 
-Prefer normal Home Assistant entities and supported YAML configuration.
+Use normal Home Assistant config-entry and entity APIs. Keep the integration
+usable by copying `custom_components/calibrated_appliance_monitor` into a Home
+Assistant configuration directory.
 
-Preserve existing `unique_id` values unless changing entity identity is
-explicitly intended.
+Use readable, human-friendly entity names and sentence case where appropriate.
+Keep public entities sparse and useful; diagnostic entities are appropriate for
+calibration and troubleshooting.
 
-Use readable, human-friendly names and sentence case where appropriate.
+Do not add dependencies, frameworks, generators, build systems, release tooling,
+or CI merely for completeness. Add project machinery only when it has a clear
+need.
 
-Where a configuration depends on installation-specific entity IDs, prefer a
-clearly documented search-and-replace section near the top of the file rather
-than clever YAML anchors or pseudo-variable systems.
+## Comments and documentation
 
-If a new installation-specific dependency is introduced, add it to that
-file's search-and-replace documentation.
+Comments should explain why calibration or lifecycle logic exists rather than
+narrating obvious code.
 
-## Comments
-
-Comments are valuable in this repository.
-
-Preserve useful existing comments and update them when behaviour changes.
-
-For non-obvious automations or state machines, comments should explain why the
-logic exists rather than merely restating the YAML.
-
-Prefer explicit and readable YAML over compact or clever YAML.
-
-## Notifications
-
-Prefer the modern Home Assistant notification entity API:
-
-    notify.send_message
-
-Avoid introducing legacy notification actions in new work.
-
-Where an existing file uses labels, areas, groups, or another abstraction to
-select recipients, preserve that approach rather than hard-coding individual
-phones or devices.
+Keep `README.md` focused on the repository and user-facing integration behaviour.
+If supported appliances, setup, public entities, or diagnostics change, update
+the documentation that describes them.
 
 ## Validation
 
-When a Home Assistant environment with the `ha` CLI is available, validate
-configuration changes with:
+When a Home Assistant environment with the `ha` CLI is available, validate with:
 
     ha core check
 
-A generic YAML parser may be used to catch syntax errors, but that does not
-prove that Home Assistant's schemas, templates, triggers, or actions are valid.
+For Python-only changes, basic syntax checks are useful but do not substitute for
+Home Assistant validation.
 
-If full Home Assistant validation has not been performed, say so.
-
-Do not deploy configuration to production or restart Home Assistant unless
-explicitly asked.
+If full Home Assistant validation has not been performed, say so. Do not deploy
+to a Home Assistant instance or restart Home Assistant unless explicitly asked.
 
 ## Git behaviour
 
-Agents may interact with GitHub directly when making requested repository
-changes. Do not require a separate confirmation merely to create a commit, push
-a branch, or open a pull request for the requested change.
+Agents may interact with GitHub directly for requested repository work.
 
-Never commit directly to the repository's default branch.
+Never commit directly to the default branch. Before the first commit for a piece
+of work, create a branch prefixed with `agents/`. If work is already on a
+non-default branch, continue using it.
 
-Before the first commit for a piece of work, create a new branch whose name is
-prefixed with `agents/`, for example `agents/dishwasher-drying-phase`.
+Commit and push requested changes, then open a pull request to the default branch
+when ready for review unless the user explicitly asks not to.
 
-If the work is already taking place on an existing non-default branch, continue
-using that branch instead of creating another one, even if its name does not
-start with `agents/`.
+Do not merge pull requests, force-push, rewrite branch history, create tags, or
+create releases unless explicitly asked.
 
-Commit the requested changes to that branch and push the branch to GitHub.
-
-When the requested change is ready for review, open a pull request from the work
-branch to the default branch unless the user explicitly asks not to.
-
-Do not merge the pull request or merge the branch into the default branch unless
-explicitly asked.
-
-Do not force-push, rewrite branch history, create tags, or create releases
-unless explicitly asked.
-
-After pushing changes, tell the user which branch was used, briefly describe
-what was committed, and link the pull request when one was opened. Include the
-commit SHA when it is available.
+After pushing changes, report the branch, commit SHA, and pull request.

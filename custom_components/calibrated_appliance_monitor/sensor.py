@@ -100,6 +100,7 @@ class DiagnosticSensor(ApplianceSensor):
     """Diagnostic entity exposing calibration internals."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_visible_default = False
 
 
 class CandidateStartedSensor(DiagnosticSensor):
@@ -155,9 +156,6 @@ class DryingCandidateSensor(DiagnosticSensor):
 
     _attr_name = "Drying start candidate"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    # This short debounce window is useful in history while calibrating, but it
-    # does not need to clutter the device page during normal use.
-    _attr_entity_registry_visible_default = False
 
     def __init__(self, monitor: ApplianceMonitor) -> None:
         super().__init__(monitor)
@@ -190,9 +188,6 @@ class FinishCandidateSensor(DiagnosticSensor):
 
     _attr_name = "Cycle finish candidate"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
-    # Normal washer behaviour can repeatedly enter and leave the quiet window.
-    # Keep recording it, but hide the resulting chatter from the default UI.
-    _attr_entity_registry_visible_default = False
 
     def __init__(self, monitor: ApplianceMonitor) -> None:
         super().__init__(monitor)
