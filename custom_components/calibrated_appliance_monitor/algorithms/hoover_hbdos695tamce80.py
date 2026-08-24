@@ -19,12 +19,17 @@ from homeassistant.core import (
     CALLBACK_TYPE,
     Event,
     EventStateChangedData,
+    EventStateReportedData,
     HomeAssistant,
     State,
     callback,
 )
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter, PowerConverter
@@ -55,6 +60,9 @@ DRY_MAX_W = 1300.0
 DRY_CONFIRM = 10
 WET_FINISH_CONFIRM = 60
 DRY_FINISH_CONFIRM = 10
+# The plug normally reports every few seconds. Recorded ~100-second telemetry gaps
+# must not turn a retained low-power state into evidence that a cycle has ended.
+POWER_REPORT_MAX_AGE = 8
 DRY_ONLY_BOUNDARY = 2 * 60
 FINISHED_MIN = 60
 FINISHED_MAX = 10 * 60
@@ -69,9 +77,10 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
     candidate start, and later >30 W activity confirms it while retaining the
     original candidate timestamp. Drying is latched after ten continuous seconds
     in the distinctive 700..1300 W dryer band. Completion is confirmed after
-    continuous <10 W quiet: 60 seconds while washing and 10 seconds once drying
-    has been seen. The official finish is backdated to the first quiet sample.
-    Finished remains visible for at least one minute and at most ten.
+    continuous, freshly reported <10 W quiet: 60 seconds while washing and 10
+    seconds once drying has been seen. The official finish is backdated to the
+    first quiet sample. Finished remains visible for at least one minute and at
+    most ten.
     """
 
     algorithm_id: ClassVar[str] = ALGORITHM_ID
@@ -108,6 +117,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
         self.timers: dict[str, CALLBACK_TYPE] = {}
         self.unsub_power: CALLBACK_TYPE | None = None
+        self.unsub_power_report: CALLBACK_TYPE | None = None
 
     @property
     def running(self) -> bool:
@@ -146,6 +156,9 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self.unsub_power = async_track_state_change_event(
             self.hass, self.power_entity_id, self._power_changed
         )
+        self.unsub_power_report = async_track_state_report_event(
+            self.hass, self.power_entity_id, self._power_reported
+        )
         if self.power is not None:
             self._reconcile_power(self.power, resume=True)
 
@@ -153,6 +166,8 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         """Cancel callbacks."""
         if self.unsub_power:
             self.unsub_power()
+        if self.unsub_power_report:
+            self.unsub_power_report()
         for cancel in self.timers.values():
             cancel()
         self.timers.clear()
@@ -220,7 +235,16 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
     @callback
     def _power_changed(self, event: Event[EventStateChangedData]) -> None:
-        new = self._power(event.data["new_state"])
+        self._handle_power_state(event.data["new_state"])
+
+    @callback
+    def _power_reported(self, _event: Event[EventStateReportedData]) -> None:
+        if not self.power_entity_id:
+            return
+        self._handle_power_state(self.hass.states.get(self.power_entity_id))
+
+    def _handle_power_state(self, state: State | None) -> None:
+        new = self._power(state)
         was_available = self.available
         self.power = new
         self.available = new is not None
@@ -238,6 +262,16 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self._changed()
 
         self._reconcile_power(new)
+
+    def _power_report_is_fresh(self) -> bool:
+        if not self.power_entity_id:
+            return False
+        state = self.hass.states.get(self.power_entity_id)
+        if state is None:
+            return False
+        return (
+            dt_util.now() - state.last_reported
+        ).total_seconds() <= POWER_REPORT_MAX_AGE
 
     def _reconcile_power(self, power: float, *, resume: bool = False) -> None:
         """Apply one trustworthy power reading to the detector."""
@@ -476,6 +510,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         if (
             self.state != WET
             or self.power is None
+            or not self._power_report_is_fresh()
             or not (DRY_MIN_W <= self.power <= DRY_MAX_W)
         ):
             self._cancel_dry_candidate()
@@ -492,6 +527,11 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self._cancel_finish_candidate()
             return
         if not self.finish_candidate_at:
+            return
+        if not self._power_report_is_fresh():
+            # A retained reading is not evidence of continued quiet. Wait for
+            # reporting to resume and require a new full confirmation window.
+            self._cancel_finish_candidate()
             return
 
         self.last_finished_at = self.finish_candidate_at
