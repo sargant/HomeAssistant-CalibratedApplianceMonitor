@@ -63,6 +63,8 @@ DRY_FINISH_CONFIRM = 10
 # The plug normally reports every few seconds. Recorded ~100-second telemetry gaps
 # must not turn a retained low-power state into evidence that a cycle has ended.
 POWER_REPORT_MAX_AGE = 8
+# A long loss of telemetry invalidates the observation; it never proves completion.
+POWER_REPORT_ABANDON = 10 * 60
 DRY_ONLY_BOUNDARY = 2 * 60
 FINISHED_MIN = 60
 FINISHED_MAX = 10 * 60
@@ -78,9 +80,11 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
     original candidate timestamp. Drying is latched after ten continuous seconds
     in the distinctive 700..1300 W dryer band. Completion is confirmed after
     continuous, freshly reported <10 W quiet: 60 seconds while washing and 10
-    seconds once drying has been seen. The official finish is backdated to the
-    first quiet sample. Finished remains visible for at least one minute and at
-    most ten.
+    seconds once drying has been seen. Missing reports make the monitor
+    unavailable after eight seconds and abandon an active observation after ten
+    minutes without ever treating telemetry loss as cycle completion. The
+    official finish is backdated to the first quiet sample. Finished remains
+    visible for at least one minute and at most ten.
     """
 
     algorithm_id: ClassVar[str] = ALGORITHM_ID
@@ -154,17 +158,22 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
         power_state = self.hass.states.get(self.power_entity_id)
         self.power = self._power(power_state)
-        self.available = self.power is not None
         if power_state is not None:
             self.last_power_reported_at = power_state.last_reported
+        self.available = self.power is not None and self._power_report_is_fresh()
         self.unsub_power = async_track_state_change_event(
             self.hass, self.power_entity_id, self._power_changed
         )
         self.unsub_power_report = async_track_state_report_event(
             self.hass, self.power_entity_id, self._power_reported
         )
-        if self.power is not None:
+        if self.last_power_reported_at is not None:
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+        if self.power is not None and self.available:
             self._reconcile_power(self.power, resume=True)
+        elif self.running:
+            self._cancel_dry_candidate()
+            self._cancel_finish_candidate()
 
     def unload(self) -> None:
         """Cancel callbacks."""
@@ -260,6 +269,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
                 self._cancel_dry_candidate()
                 self._cancel_finish_candidate()
             self.last_power_reported_at = report_at
+            self._arm_power_stale_watchdog(report_at)
 
         new = self._power(state)
         was_available = self.available
@@ -289,6 +299,34 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         return (
             dt_util.now() - state.last_reported
         ).total_seconds() <= POWER_REPORT_MAX_AGE
+
+    def _arm_power_stale_watchdog(self, report_at: datetime) -> None:
+        self._cancel_runtime("power_abandon")
+        elapsed = max(0.0, (dt_util.now() - report_at).total_seconds())
+        self._schedule_runtime(
+            "power_stale",
+            max(0.0, POWER_REPORT_MAX_AGE - elapsed),
+            self._power_stale_timeout,
+        )
+
+    def _schedule_runtime(
+        self,
+        name: str,
+        seconds: float,
+        handler: Callable[[datetime], None],
+    ) -> None:
+        self._cancel_runtime(name)
+
+        @callback
+        def fire(now: datetime) -> None:
+            self.timers.pop(name, None)
+            handler(now)
+
+        self.timers[name] = async_call_later(self.hass, max(0.0, seconds), fire)
+
+    def _cancel_runtime(self, name: str) -> None:
+        if cancel := self.timers.pop(name, None):
+            cancel()
 
     def _reconcile_power(self, power: float, *, resume: bool = False) -> None:
         """Apply one trustworthy power reading to the detector."""
@@ -512,6 +550,59 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self.finish_candidate_energy_kwh = None
             self._save()
             self._changed()
+
+    @callback
+    def _power_stale_timeout(self, _now: datetime) -> None:
+        if self.last_power_reported_at is None:
+            return
+        elapsed = (dt_util.now() - self.last_power_reported_at).total_seconds()
+        if elapsed < POWER_REPORT_MAX_AGE:
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+            return
+
+        self._cancel_dry_candidate()
+        self._cancel_finish_candidate()
+        if self.available:
+            self.available = False
+            self._changed()
+
+        if self.running:
+            remaining = POWER_REPORT_ABANDON - elapsed
+            if remaining <= 0:
+                self._abandon_active_cycle()
+            else:
+                self._schedule_runtime(
+                    "power_abandon", remaining, self._power_abandon_timeout
+                )
+
+    @callback
+    def _power_abandon_timeout(self, _now: datetime) -> None:
+        if self.last_power_reported_at is None or not self.running:
+            return
+        elapsed = (dt_util.now() - self.last_power_reported_at).total_seconds()
+        if elapsed < POWER_REPORT_ABANDON:
+            self._schedule_runtime(
+                "power_abandon",
+                POWER_REPORT_ABANDON - elapsed,
+                self._power_abandon_timeout,
+            )
+            return
+        self._abandon_active_cycle()
+
+    def _abandon_active_cycle(self) -> None:
+        """Discard an active observation without recording a completion."""
+        if not self.running:
+            return
+        self._clear_start_candidate()
+        self._cancel_dry_candidate()
+        self._cancel_finish_candidate()
+        self.dry_seen = False
+        self.dry_candidate_at = None
+        self.drying_started_at = None
+        self.finish_candidate_at = None
+        self.finish_candidate_energy_kwh = None
+        self.finished_entered_at = None
+        self._set_state(IDLE)
 
     @callback
     def _start_timeout(self, _now: datetime) -> None:
