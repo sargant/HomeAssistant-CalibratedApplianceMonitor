@@ -19,12 +19,17 @@ from homeassistant.core import (
     CALLBACK_TYPE,
     Event,
     EventStateChangedData,
+    EventStateReportedData,
     HomeAssistant,
     State,
     callback,
 )
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+    async_track_state_report_event,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter, PowerConverter
@@ -55,6 +60,10 @@ DRY_MAX_W = 1300.0
 DRY_CONFIRM = 10
 WET_FINISH_CONFIRM = 60
 DRY_FINISH_CONFIRM = 10
+# The plug reports every few seconds; gaps break continuity after 8 seconds and
+# abandon an active observation after 10 minutes.
+POWER_REPORT_MAX_AGE = 8
+POWER_REPORT_ABANDON = 10 * 60
 DRY_ONLY_BOUNDARY = 2 * 60
 FINISHED_MIN = 60
 FINISHED_MAX = 10 * 60
@@ -69,9 +78,12 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
     candidate start, and later >30 W activity confirms it while retaining the
     original candidate timestamp. Drying is latched after ten continuous seconds
     in the distinctive 700..1300 W dryer band. Completion is confirmed after
-    continuous <10 W quiet: 60 seconds while washing and 10 seconds once drying
-    has been seen. The official finish is backdated to the first quiet sample.
-    Finished remains visible for at least one minute and at most ten.
+    continuous, freshly reported <10 W quiet: 60 seconds while washing and 10
+    seconds once drying has been seen. Missing reports make the monitor
+    unavailable after eight seconds and abandon an active observation after ten
+    minutes without ever treating telemetry loss as cycle completion. The
+    official finish is backdated to the first quiet sample. Finished remains
+    visible for at least one minute and at most ten.
     """
 
     algorithm_id: ClassVar[str] = ALGORITHM_ID
@@ -105,9 +117,11 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self.energy_entity_id: str | None = None
         self.available = False
         self.power: float | None = None
+        self.last_power_reported_at: datetime | None = None
 
         self.timers: dict[str, CALLBACK_TYPE] = {}
         self.unsub_power: CALLBACK_TYPE | None = None
+        self.unsub_power_report: CALLBACK_TYPE | None = None
 
     @property
     def running(self) -> bool:
@@ -141,18 +155,49 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             _LOGGER.warning("Selected washer-dryer source has no power sensor")
             return
 
-        self.power = self._power(self.hass.states.get(self.power_entity_id))
-        self.available = self.power is not None
+        power_state = self.hass.states.get(self.power_entity_id)
+        self.power = self._power(power_state)
+        if self.power is not None and power_state is not None:
+            self.last_power_reported_at = power_state.last_reported
+        self.available = self.power is not None and self._power_report_is_fresh()
         self.unsub_power = async_track_state_change_event(
             self.hass, self.power_entity_id, self._power_changed
         )
-        if self.power is not None:
+        self.unsub_power_report = async_track_state_report_event(
+            self.hass, self.power_entity_id, self._power_reported
+        )
+        if self.last_power_reported_at is not None:
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+        elif self.running:
+            self.last_power_reported_at = dt_util.now()
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+
+        if self.candidate_started_at and not self.available:
+            if self._has_future_deadline("start"):
+                self._schedule("start", START_WINDOW, self._start_timeout, resume=True)
+            else:
+                self._start_timeout(dt_util.now())
+
+        if self.state == FINISHED and not self.available and not self.candidate_started_at:
+            if self._has_future_deadline("finished_max"):
+                self._schedule(
+                    "finished_max", FINISHED_MAX, self._finished_max_timeout, resume=True
+                )
+            else:
+                self._return_idle()
+
+        if self.power is not None and self.available:
             self._reconcile_power(self.power, resume=True)
+        elif self.running:
+            self._cancel_dry_candidate()
+            self._cancel_finish_candidate()
 
     def unload(self) -> None:
         """Cancel callbacks."""
         if self.unsub_power:
             self.unsub_power()
+        if self.unsub_power_report:
+            self.unsub_power_report()
         for cancel in self.timers.values():
             cancel()
         self.timers.clear()
@@ -220,7 +265,28 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
     @callback
     def _power_changed(self, event: Event[EventStateChangedData]) -> None:
-        new = self._power(event.data["new_state"])
+        self._handle_power_state(event.data["new_state"])
+
+    @callback
+    def _power_reported(self, _event: Event[EventStateReportedData]) -> None:
+        if not self.power_entity_id:
+            return
+        self._handle_power_state(self.hass.states.get(self.power_entity_id))
+
+    def _handle_power_state(self, state: State | None) -> None:
+        new = self._power(state)
+        if new is not None and state is not None:
+            report_at = state.last_reported
+            if self.last_power_reported_at is not None:
+                gap = (report_at - self.last_power_reported_at).total_seconds()
+                if gap > POWER_REPORT_ABANDON and self.running:
+                    self._abandon_active_cycle()
+                elif gap > POWER_REPORT_MAX_AGE:
+                    self._cancel_dry_candidate()
+                    self._cancel_finish_candidate()
+            self.last_power_reported_at = report_at
+            self._arm_power_stale_watchdog(report_at)
+
         was_available = self.available
         self.power = new
         self.available = new is not None
@@ -238,6 +304,44 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self._changed()
 
         self._reconcile_power(new)
+
+    def _power_report_is_fresh(self) -> bool:
+        if not self.power_entity_id:
+            return False
+        state = self.hass.states.get(self.power_entity_id)
+        if state is None:
+            return False
+        return (
+            dt_util.now() - state.last_reported
+        ).total_seconds() <= POWER_REPORT_MAX_AGE
+
+    def _arm_power_stale_watchdog(self, report_at: datetime) -> None:
+        self._cancel_runtime("power_abandon")
+        elapsed = max(0.0, (dt_util.now() - report_at).total_seconds())
+        self._schedule_runtime(
+            "power_stale",
+            max(0.0, POWER_REPORT_MAX_AGE - elapsed),
+            self._power_stale_timeout,
+        )
+
+    def _schedule_runtime(
+        self,
+        name: str,
+        seconds: float,
+        handler: Callable[[datetime], None],
+    ) -> None:
+        self._cancel_runtime(name)
+
+        @callback
+        def fire(now: datetime) -> None:
+            self.timers.pop(name, None)
+            handler(now)
+
+        self.timers[name] = async_call_later(self.hass, max(0.0, seconds), fire)
+
+    def _cancel_runtime(self, name: str) -> None:
+        if cancel := self.timers.pop(name, None):
+            cancel()
 
     def _reconcile_power(self, power: float, *, resume: bool = False) -> None:
         """Apply one trustworthy power reading to the detector."""
@@ -463,6 +567,59 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self._changed()
 
     @callback
+    def _power_stale_timeout(self, _now: datetime) -> None:
+        if self.last_power_reported_at is None:
+            return
+        elapsed = (dt_util.now() - self.last_power_reported_at).total_seconds()
+        if elapsed < POWER_REPORT_MAX_AGE:
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+            return
+
+        self._cancel_dry_candidate()
+        self._cancel_finish_candidate()
+        if self.available:
+            self.available = False
+            self._changed()
+
+        if self.running:
+            remaining = POWER_REPORT_ABANDON - elapsed
+            if remaining <= 0:
+                self._abandon_active_cycle()
+            else:
+                self._schedule_runtime(
+                    "power_abandon", remaining, self._power_abandon_timeout
+                )
+
+    @callback
+    def _power_abandon_timeout(self, _now: datetime) -> None:
+        if self.last_power_reported_at is None or not self.running:
+            return
+        elapsed = (dt_util.now() - self.last_power_reported_at).total_seconds()
+        if elapsed < POWER_REPORT_ABANDON:
+            self._schedule_runtime(
+                "power_abandon",
+                POWER_REPORT_ABANDON - elapsed,
+                self._power_abandon_timeout,
+            )
+            return
+        self._abandon_active_cycle()
+
+    def _abandon_active_cycle(self) -> None:
+        """Discard an active observation without recording a completion."""
+        if not self.running:
+            return
+        self._clear_start_candidate()
+        self._cancel_dry_candidate()
+        self._cancel_finish_candidate()
+        self.dry_seen = False
+        self.dry_candidate_at = None
+        self.drying_started_at = None
+        self.finish_candidate_at = None
+        self.finish_candidate_energy_kwh = None
+        self.finished_entered_at = None
+        self._set_state(IDLE)
+
+    @callback
     def _start_timeout(self, _now: datetime) -> None:
         if self.state == FINISHED:
             # A Finished-state candidate temporarily suspends the old dwell
@@ -476,6 +633,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         if (
             self.state != WET
             or self.power is None
+            or not self._power_report_is_fresh()
             or not (DRY_MIN_W <= self.power <= DRY_MAX_W)
         ):
             self._cancel_dry_candidate()
@@ -492,6 +650,9 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self._cancel_finish_candidate()
             return
         if not self.finish_candidate_at:
+            return
+        if not self._power_report_is_fresh():
+            self._cancel_finish_candidate()
             return
 
         self.last_finished_at = self.finish_candidate_at
