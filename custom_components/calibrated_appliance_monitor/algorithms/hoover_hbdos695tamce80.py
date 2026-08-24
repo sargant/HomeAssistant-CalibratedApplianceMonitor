@@ -60,10 +60,9 @@ DRY_MAX_W = 1300.0
 DRY_CONFIRM = 10
 WET_FINISH_CONFIRM = 60
 DRY_FINISH_CONFIRM = 10
-# The plug normally reports every few seconds. Recorded ~100-second telemetry gaps
-# must not turn a retained low-power state into evidence that a cycle has ended.
+# The plug reports every few seconds; gaps break continuity after 8 seconds and
+# abandon an active observation after 10 minutes.
 POWER_REPORT_MAX_AGE = 8
-# A long loss of telemetry invalidates the observation; it never proves completion.
 POWER_REPORT_ABANDON = 10 * 60
 DRY_ONLY_BOUNDARY = 2 * 60
 FINISHED_MIN = 60
@@ -264,8 +263,6 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
                 and (report_at - self.last_power_reported_at).total_seconds()
                 > POWER_REPORT_MAX_AGE
             ):
-                # A reporting gap breaks continuity. The current sample can
-                # immediately begin a new debounce window below.
                 self._cancel_dry_candidate()
                 self._cancel_finish_candidate()
             self.last_power_reported_at = report_at
@@ -637,8 +634,6 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         if not self.finish_candidate_at:
             return
         if not self._power_report_is_fresh():
-            # A retained reading is not evidence of continued quiet. Wait for
-            # reporting to resume and require a new full confirmation window.
             self._cancel_finish_candidate()
             return
 
