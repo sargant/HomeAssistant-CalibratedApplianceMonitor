@@ -79,7 +79,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
     original candidate timestamp. Drying is latched after ten continuous seconds
     in the distinctive 700..1300 W dryer band. Completion is confirmed after
     continuous, freshly reported <10 W quiet: 60 seconds while washing and 10
-    seconds once drying has been seen. Missing reports make the monitor
+    seconds once drying has been seen. Missing reports make an active monitor
     unavailable after eight seconds and abandon an active observation after ten
     minutes without ever treating telemetry loss as cycle completion. The
     official finish is backdated to the first quiet sample. Finished remains
@@ -159,7 +159,8 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self.power = self._power(power_state)
         if self.power is not None and power_state is not None:
             self.last_power_reported_at = power_state.last_reported
-        self.available = self.power is not None and self._power_report_is_fresh()
+        fresh_power = self.power is not None and self._power_report_is_fresh()
+        self.available = self.power is not None and (not self.running or fresh_power)
         self.unsub_power = async_track_state_change_event(
             self.hass, self.power_entity_id, self._power_changed
         )
@@ -172,13 +173,13 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self.last_power_reported_at = dt_util.now()
             self._arm_power_stale_watchdog(self.last_power_reported_at)
 
-        if self.candidate_started_at and not self.available:
+        if self.candidate_started_at and not fresh_power:
             if self._has_future_deadline("start"):
                 self._schedule("start", START_WINDOW, self._start_timeout, resume=True)
             else:
                 self._start_timeout(dt_util.now())
 
-        if self.state == FINISHED and not self.available and not self.candidate_started_at:
+        if self.state == FINISHED and not fresh_power and not self.candidate_started_at:
             if self._has_future_deadline("finished_max"):
                 self._schedule(
                     "finished_max", FINISHED_MAX, self._finished_max_timeout, resume=True
@@ -186,7 +187,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             else:
                 self._return_idle()
 
-        if self.power is not None and self.available:
+        if fresh_power:
             self._reconcile_power(self.power, resume=True)
         elif self.running:
             self._cancel_dry_candidate()
@@ -577,7 +578,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
         self._cancel_dry_candidate()
         self._cancel_finish_candidate()
-        if self.available:
+        if self.available and self.running:
             self.available = False
             self._changed()
 
