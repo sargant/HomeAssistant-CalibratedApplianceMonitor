@@ -114,6 +114,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self.energy_entity_id: str | None = None
         self.available = False
         self.power: float | None = None
+        self.last_power_reported_at: datetime | None = None
 
         self.timers: dict[str, CALLBACK_TYPE] = {}
         self.unsub_power: CALLBACK_TYPE | None = None
@@ -151,8 +152,11 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             _LOGGER.warning("Selected washer-dryer source has no power sensor")
             return
 
-        self.power = self._power(self.hass.states.get(self.power_entity_id))
+        power_state = self.hass.states.get(self.power_entity_id)
+        self.power = self._power(power_state)
         self.available = self.power is not None
+        if power_state is not None:
+            self.last_power_reported_at = power_state.last_reported
         self.unsub_power = async_track_state_change_event(
             self.hass, self.power_entity_id, self._power_changed
         )
@@ -244,6 +248,19 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self._handle_power_state(self.hass.states.get(self.power_entity_id))
 
     def _handle_power_state(self, state: State | None) -> None:
+        if state is not None:
+            report_at = state.last_reported
+            if (
+                self.last_power_reported_at is not None
+                and (report_at - self.last_power_reported_at).total_seconds()
+                > POWER_REPORT_MAX_AGE
+            ):
+                # A reporting gap breaks continuity. The current sample can
+                # immediately begin a new debounce window below.
+                self._cancel_dry_candidate()
+                self._cancel_finish_candidate()
+            self.last_power_reported_at = report_at
+
         new = self._power(state)
         was_available = self.available
         self.power = new
