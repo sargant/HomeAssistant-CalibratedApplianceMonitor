@@ -178,6 +178,14 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             else:
                 self._start_timeout(dt_util.now())
 
+        if self.state == FINISHED and not self.available and not self.candidate_started_at:
+            if self._has_future_deadline("finished_max"):
+                self._schedule(
+                    "finished_max", FINISHED_MAX, self._finished_max_timeout, resume=True
+                )
+            else:
+                self._return_idle()
+
         if self.power is not None and self.available:
             self._reconcile_power(self.power, resume=True)
         elif self.running:
@@ -269,13 +277,13 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         new = self._power(state)
         if new is not None and state is not None:
             report_at = state.last_reported
-            if (
-                self.last_power_reported_at is not None
-                and (report_at - self.last_power_reported_at).total_seconds()
-                > POWER_REPORT_MAX_AGE
-            ):
-                self._cancel_dry_candidate()
-                self._cancel_finish_candidate()
+            if self.last_power_reported_at is not None:
+                gap = (report_at - self.last_power_reported_at).total_seconds()
+                if gap > POWER_REPORT_ABANDON and self.running:
+                    self._abandon_active_cycle()
+                elif gap > POWER_REPORT_MAX_AGE:
+                    self._cancel_dry_candidate()
+                    self._cancel_finish_candidate()
             self.last_power_reported_at = report_at
             self._arm_power_stale_watchdog(report_at)
 
