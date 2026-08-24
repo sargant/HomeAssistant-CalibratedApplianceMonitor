@@ -157,7 +157,7 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
 
         power_state = self.hass.states.get(self.power_entity_id)
         self.power = self._power(power_state)
-        if power_state is not None:
+        if self.power is not None and power_state is not None:
             self.last_power_reported_at = power_state.last_reported
         self.available = self.power is not None and self._power_report_is_fresh()
         self.unsub_power = async_track_state_change_event(
@@ -266,7 +266,8 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         self._handle_power_state(self.hass.states.get(self.power_entity_id))
 
     def _handle_power_state(self, state: State | None) -> None:
-        if state is not None:
+        new = self._power(state)
+        if new is not None and state is not None:
             report_at = state.last_reported
             if (
                 self.last_power_reported_at is not None
@@ -278,7 +279,6 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
             self.last_power_reported_at = report_at
             self._arm_power_stale_watchdog(report_at)
 
-        new = self._power(state)
         was_available = self.available
         self.power = new
         self.available = new is not None
