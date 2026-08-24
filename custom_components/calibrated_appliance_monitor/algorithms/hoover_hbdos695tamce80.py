@@ -168,6 +168,16 @@ class HooverHBDOS695TAMCE80Monitor(ApplianceMonitor):
         )
         if self.last_power_reported_at is not None:
             self._arm_power_stale_watchdog(self.last_power_reported_at)
+        elif self.running:
+            self.last_power_reported_at = dt_util.now()
+            self._arm_power_stale_watchdog(self.last_power_reported_at)
+
+        if self.candidate_started_at and not self.available:
+            if self._has_future_deadline("start"):
+                self._schedule("start", START_WINDOW, self._start_timeout, resume=True)
+            else:
+                self._start_timeout(dt_util.now())
+
         if self.power is not None and self.available:
             self._reconcile_power(self.power, resume=True)
         elif self.running:
